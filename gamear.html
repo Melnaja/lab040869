@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AR Make a Sentence Game</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- MediaPipe Hands -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #1a202c; /* Tailwind gray-900 fallback */
+            font-family: 'Inter', sans-serif;
+            touch-action: none; /* Prevent default touch actions like scrolling */
+        }
+
+        /* Glassmorphism utility */
+        .glass {
+            background: rgba(255, 255, 255, 0.2);
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Container to stack video and canvas */
+        .video-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            background: #000;
+        }
+
+        #webcam {
+            /* Mirror the video to act like a mirror */
+            transform: scaleX(-1);
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            position: absolute;
+            z-index: 1;
+        }
+
+        #gameCanvas {
+            position: absolute;
+            z-index: 10;
+            /* Canvas drawing handles mirroring for graphics natively via scale(-1, 1) if needed, 
+               but since we are drawing UI over a mirrored video, we map coordinates instead. */
+            width: 100%;
+            height: 100%;
+        }
+
+        /* UI Overlays */
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 20;
+            pointer-events: none; /* Let clicks pass through to canvas/document listener */
+        }
+        
+        /* Make specific UI elements interactive via mouse if needed, though we manage clicks mostly in canvas */
+        .interactive-ui {
+            pointer-events: auto;
+        }
+    </style>
+</head>
+<body class="text-white select-none">
+
+    <div class="video-container">
+        <!-- Video for webcam feed -->
+        <video id="webcam" autoplay playsinline></video>
+        <!-- Canvas for game graphics and MediaPipe drawing -->
+        <canvas id="gameCanvas"></canvas>
+    </div>
+
+    <!-- HTML-based UI Layer (for things easier done in HTML than Canvas) -->
+    <div id="ui-layer" class="flex flex-col justify-between p-4">
+        
+        <!-- Header: Level Info & Score -->
+        <div id="header-ui" class="flex justify-between items-start hidden">
+            <div class="glass px-6 py-3 rounded-2xl">
+                <h2 id="level-title" class="text-xl font-bold text-yellow-300">Level 1</h2>
+                <p id="thai-translation" class="text-lg">ฉัน รัก สุนัข</p>
+            </div>
+            <div class="glass px-6 py-3 rounded-2xl text-right">
+                <p class="text-sm uppercase tracking-wider text-gray-300">Score</p>
+                <p id="score-display" class="text-2xl font-bold text-green-400">0</p>
+            </div>
+        </div>
+
+        <!-- Status Message (e.g., finding hands) -->
+        <div id="status-message" class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 glass px-6 py-4 rounded-xl text-center hidden">
+            <p class="text-lg font-semibold animate-pulse text-yellow-200">กำลังหามือของคุณ... (Looking for hands)</p>
+            <p class="text-sm mt-2">หรือใช้เมาส์คลิกลากเพื่อเล่น (Or use mouse to play)</p>
+        </div>
+
+        <!-- Start / Title Screen -->
+        <div id="start-screen" class="absolute inset-0 flex flex-col items-center justify-center bg-black/60 interactive-ui transition-opacity duration-500">
+            <h1 class="text-5xl md:text-7xl font-extrabold mb-4 text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-emerald-400 drop-shadow-lg text-center">
+                Make a Sentence<br><span class="text-3xl text-white">AR Edition</span>
+            </h1>
+            <p class="mb-8 text-xl max-w-md text-center text-gray-200">
+                ใช้มือหยิบคำศัพท์มาเรียงให้ถูกต้อง หรือใช้เมาส์คลิกลาก
+            </p>
+            <button id="btn-init" class="glass bg-white/10 hover:bg-white/20 text-white font-bold py-4 px-8 rounded-full text-2xl transition transform hover:scale-105 active:scale-95 shadow-[0_0_15px_rgba(52,211,246,0.5)]">
+                เข้าสู่เกม (Start)
+            </button>
+        </div>
+
+        <!-- End Screen -->
+        <div id="end-screen" class="absolute inset-0 flex flex-col items-center justify-center bg-black/80 hidden interactive-ui">
+            <h1 class="text-6xl font-extrabold mb-4 text-green-400 drop-shadow-[0_0_20px_rgba(74,222,128,0.8)]">All Clear!</h1>
+            <p class="text-2xl mb-8">คุณเก่งมาก! (Great Job!)</p>
+            <p class="text-xl mb-8">Total Score: <span id="final-score" class="text-yellow-400 font-bold"></span></p>
+            <button id="btn-restart" class="glass bg-white/10 hover:bg-white/20 text-white font-bold py-3 px-8 rounded-full text-xl transition transform hover:scale-105">
+                Play Again
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // DOM Elements
+        const videoElement = document.getElementById('webcam');
+        const canvasElement = document.getElementById('gameCanvas');
+        const ctx = canvasElement.getContext('2d');
+        const startScreen = document.getElementById('start-screen');
+        const btnInit = document.getElementById('btn-init');
+        const headerUI = document.getElementById('header-ui');
+        const levelTitle = document.getElementById('level-title');
+        const thaiTranslation = document.getElementById('thai-translation');
+        const scoreDisplay = document.getElementById('score-display');
+        const statusMessage = document.getElementById('status-message');
+        const endScreen = document.getElementById('end-screen');
+        const finalScore = document.getElementById('final-score');
+        const btnRestart = document.getElementById('btn-restart');
+
+        // Game State
+        let gameState = 'START'; // START, INSTRUCT, PLAYING, END
+        let currentLevelIndex = 0;
+        let score = 0;
+        let handsDetected = false;
+        let lastHandDetectionTime = 0;
+        
+        // Level Data
+        const levels = [
+            {
+                thai: "ฉัน รัก สุนัข",
+                words: [{text: "I", emoji: "🙋"}, {text: "love", emoji: "❤️"}, {text: "dogs", emoji: "🐶"}],
+                points: 100
+            },
+            {
+                thai: "แมว ตัวนั้น น่ารัก",
+                words: [{text: "The", emoji: "👉"}, {text: "cat", emoji: "🐱"}, {text: "is", emoji: "✨"}, {text: "cute", emoji: "😍"}],
+                points: 100
+            },
+            {
+                thai: "นก บิน อยู่ใน ท้องฟ้า",
+                words: [{text: "Birds", emoji: "🕊️"}, {text: "fly", emoji: "💨"}, {text: "in", emoji: "☁️"}, {text: "sky", emoji: "🌤️"}],
+                points: 100
+            }
+        ];
+
+        // Cursor State (combines Hand tracking and Mouse/Touch fallback)
+        const cursor = {
+            x: -100, y: -100,
+            isPinching: false,
+            state: 'NORMAL', // NORMAL, HOVER, MISS, HIT
+            source: 'NONE' // NONE, HAND, MOUSE
+        };
+
+        // Game Objects
+        let wordCards = [];
+        let dropZones = [];
+        let draggedCard = null;
+        let startButton3D = null; // The floating start button on canvas
+
+        // Layout settings
+        let cw, ch;
+        const cardSize = { w: 120, h: 140 };
+
+        function resizeCanvas() {
+            cw = window.innerWidth;
+            ch = window.innerHeight;
+            canvasElement.width = cw;
+            canvasElement.height = ch;
+            
+            // Re-layout items if game is playing
+            if (gameState === 'PLAYING') {
+                setupDropZones();
+                // Ensure cards stay on screen
+                wordCards.forEach(card => {
+                    card.x = Math.max(0, Math.min(card.x, cw - card.w));
+                    card.y = Math.max(0, Math.min(card.y, ch - card.h));
+                });
+            } else if (gameState === 'INSTRUCT') {
+                setupStartButton();
+            }
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        function dist(x1, y1, x2, y2) {
+            const dx = x2 - x1;
+            const dy = y2 - y1;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+
+        function checkCollision(cx, cy, rect) {
+            return cx >= rect.x && cx <= rect.x + rect.w &&
+                   cy >= rect.y && cy <= rect.y + rect.h;
+        }
+
+        // Rounded rectangle drawing function
+        function roundRect(ctx, x, y, width, height, radius, fill, stroke) {
+            if (typeof radius === 'undefined') radius = 5;
+            ctx.beginPath();
+            ctx.moveTo(x + radius, y);
+            ctx.lineTo(x + width - radius, y);
+            ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+            ctx.lineTo(x + width, y + height - radius);
+            ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+            ctx.lineTo(x + radius, y + height);
+            ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+            ctx.lineTo(x, y + radius);
+            ctx.quadraticCurveTo(x, y, x + radius, y);
+            ctx.closePath();
+            if (fill) ctx.fill();
+            if (stroke) ctx.stroke();
+        }
+
+        function initLevel(index) {
+            if (index >= levels.length) {
+                endGame();
+                return;
+            }
+            
+            currentLevelIndex = index;
+            const levelData = levels[index];
+            
+            // Update UI
+            levelTitle.innerText = `Level ${index + 1}`;
+            thaiTranslation.innerText = levelData.thai;
+            
+            // Setup Drop Zones at the bottom
+            setupDropZones();
+
+            // Setup Word Cards randomly scattered in the upper portion
+            wordCards = [];
+            const shuffledWords = [...levelData.words].sort(() => Math.random() - 0.5);
+            
+            shuffledWords.forEach((wordObj, i) => {
+                // Ensure they don't overlap too much initially and stay in upper 60%
+                let rx, ry;
+                let overlap = true;
+                let attempts = 0;
+                while(overlap && attempts < 50) {
+                    rx = Math.random() * (cw - cardSize.w - 40) + 20;
+                    ry = Math.random() * (ch * 0.5) + 100; // Below header
+                    
+                    overlap = wordCards.some(card => 
+                        dist(rx + cardSize.w/2, ry + cardSize.h/2, card.x + card.w/2, card.y + card.h/2) < Math.max(cardSize.w, cardSize.h)
+                    );
+                    attempts++;
+                }
+
+                wordCards.push({
+                    text: wordObj.text,
+                    emoji: wordObj.emoji,
+                    x: rx,
+                    y: ry,
+                    w: cardSize.w,
+                    h: cardSize.h,
+                    isPlaced: false,
+                    targetZoneIndex: levelData.words.findIndex(w => w.text === wordObj.text),
+                    hovered: false
+                });
+            });
+            
+            gameState = 'PLAYING';
+            draggedCard = null;
+        }
+
+        function setupDropZones() {
+            if (!levels[currentLevelIndex]) return;
+            const numZones = levels[currentLevelIndex].words.length;
+            const zoneWidth = cardSize.w + 20;
+            const totalWidth = numZones * zoneWidth;
+            const startX = (cw - totalWidth) / 2;
+            const yPos = ch - cardSize.h - 40; // Near bottom
+
+            dropZones = [];
+            for (let i = 0; i < numZones; i++) {
+                dropZones.push({
+                    x: startX + (i * zoneWidth),
+                    y: yPos,
+                    w: cardSize.w,
+                    h: cardSize.h,
+                    filled: false,
+                    expectedText: levels[currentLevelIndex].words[i].text
+                });
+            }
+        }
+
+        function setupStartButton() {
+            startButton3D = {
+                x: cw / 2 - 100,
+                y: ch / 2 - 40,
+                w: 200,
+                h: 80,
+                text: "เริ่มเกม! (Start)",
+                hovered: false
+            };
+        }
+
+        function endGame() {
+            gameState = 'END';
+            headerUI.classList.add('hidden');
+            statusMessage.classList.add('hidden');
+            endScreen.classList.remove('hidden');
+            finalScore.innerText = score;
+        }
+
+        let handLandmarks = null;
+
+        function onResults(results) {
+            // This runs roughly at webcam frame rate
+            
+            // Draw camera feed to canvas? No, we use a stacked video element for better performance and CSS handling.
+            // We only draw UI and AR elements on the canvas.
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                handsDetected = true;
+                lastHandDetectionTime = performance.now();
+                handLandmarks = results.multiHandLandmarks[0]; // Use first hand detected
+                
+                // IMPORTANT: Webcam is mirrored (scaleX(-1)). MediaPipe returns coordinates [0,1]
+                // corresponding to the unmirrored image. 
+                // Since our video is CSS-mirrored, to align the canvas drawing with the visual video,
+                // we need to mirror the x-coordinate from MediaPipe.
+                
+                // Index Finger Tip (Landmark 8)
+                const indexX = (1 - handLandmarks[8].x) * cw; 
+                const indexY = handLandmarks[8].y * ch;
+                
+                // Thumb Tip (Landmark 4)
+                const thumbX = (1 - handLandmarks[4].x) * cw;
+                const thumbY = handLandmarks[4].y * ch;
+
+                // Only update cursor from hand if we aren't actively using mouse
+                if (cursor.source !== 'MOUSE') {
+                    cursor.x = indexX;
+                    cursor.y = indexY;
+                    cursor.source = 'HAND';
+
+                    // Calculate distance for pinch
+                    const pinchDist = dist(indexX, indexY, thumbX, thumbY);
+                    
+                    // Threshold for pinching (adjust based on testing, usually ~5-8% of screen height)
+                    const pinchThreshold = ch * 0.06; 
+                    
+                    const isNowPinching = pinchDist < pinchThreshold;
+                    
+                    // Trigger input logic
+                    handleInput(cursor.x, cursor.y, isNowPinching);
+                }
+            } else {
+                handLandmarks = null;
+                // If no hands seen for a bit, set flag to show message
+                if (performance.now() - lastHandDetectionTime > 500) {
+                    handsDetected = false;
+                }
+            }
+        }
+
+        const hands = new Hands({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+        }});
+        
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+        
+        hands.onResults(onResults);
+
+        function handleInput(cx, cy, isPinching) {
+            cursor.x = cx;
+            cursor.y = cy;
+            
+            // Check hovering state based on current game state
+            let isHoveringSomething = false;
+
+            if (gameState === 'INSTRUCT' && startButton3D) {
+                startButton3D.hovered = checkCollision(cx, cy, startButton3D);
+                isHoveringSomething = startButton3D.hovered;
+
+                if (isPinching && !cursor.isPinching && startButton3D.hovered) {
+                    // Clicked Start
+                    gameState = 'PLAYING';
+                    initLevel(0);
+                    // Reset pinch state so we don't immediately grab a card
+                    cursor.isPinching = true; 
+                    cursor.state = 'HIT';
+                    return;
+                }
+            } else if (gameState === 'PLAYING') {
+                // Check word cards
+                wordCards.forEach(card => card.hovered = false);
+                
+                if (!draggedCard) {
+                    // Find topmost card hovered
+                    for (let i = wordCards.length - 1; i >= 0; i--) {
+                        const card = wordCards[i];
+                        if (!card.isPlaced && checkCollision(cx, cy, card)) {
+                            card.hovered = true;
+                            isHoveringSomething = true;
+                            
+                            // Grab mechanism (Pinch start)
+                            if (isPinching && !cursor.isPinching) {
+                                draggedCard = card;
+                                // Move to end of array to draw on top
+                                wordCards.push(wordCards.splice(i, 1)[0]);
+                                cursor.state = 'HIT';
+                            }
+                            break; // Only hover one card
+                        }
+                    }
+                } else {
+                    // We are dragging a card
+                    isHoveringSomething = true;
+                    // Update card position (center on cursor)
+                    draggedCard.x = cx - draggedCard.w / 2;
+                    draggedCard.y = cy - draggedCard.h / 2;
+
+                    // Release mechanism (Pinch end)
+                    if (!isPinching && cursor.isPinching) {
+                        checkDrop(draggedCard);
+                        draggedCard = null;
+                        cursor.state = 'NORMAL';
+                    }
+                }
+            }
+
+            // Update Cursor Visual State (if not forced to HIT or MISS by actions)
+            if (cursor.state !== 'HIT' && cursor.state !== 'MISS') {
+                cursor.state = isHoveringSomething ? 'HOVER' : 'NORMAL';
+            }
+
+            // Visual feedback on failed pinch (pinched nothing)
+            if (isPinching && !cursor.isPinching && !isHoveringSomething) {
+                cursor.state = 'MISS';
+                // Reset to normal quickly
+                setTimeout(() => { if (cursor.state === 'MISS') cursor.state = 'NORMAL'; }, 300);
+            }
+
+            // Reset HIT state quickly
+            if (cursor.state === 'HIT' && !isPinching) {
+                 setTimeout(() => { if (cursor.state === 'HIT') cursor.state = 'NORMAL'; }, 300);
+            }
+
+            cursor.isPinching = isPinching;
+        }
+
+        function checkDrop(card) {
+            let droppedInZone = false;
+            for (let i = 0; i < dropZones.length; i++) {
+                const zone = dropZones[i];
+                // Check if center of card is within zone
+                const ccx = card.x + card.w / 2;
+                const ccy = card.y + card.h / 2;
+                
+                if (ccx > zone.x && ccx < zone.x + zone.w &&
+                    ccy > zone.y && ccy < zone.y + zone.h) {
+                    
+                    if (zone.expectedText === card.text) {
+                        // Correct placement
+                        card.x = zone.x;
+                        card.y = zone.y;
+                        card.isPlaced = true;
+                        zone.filled = true;
+                        droppedInZone = true;
+                        
+                        // Check win condition
+                        if (dropZones.every(z => z.filled)) {
+                            score += levels[currentLevelIndex].points;
+                            scoreDisplay.innerText = score;
+                            setTimeout(() => {
+                                initLevel(currentLevelIndex + 1);
+                            }, 1500); // Short delay before next level
+                        }
+                        break;
+                    } else {
+                        // Wrong placement, visual feedback?
+                        // Just let it float nearby, maybe nudge it out
+                        card.y -= 50; 
+                    }
+                }
+            }
+        }
+
+        function setMouseSource(e) {
+            cursor.source = 'MOUSE';
+            let clientX = e.clientX;
+            let clientY = e.clientY;
+            
+            if (e.touches && e.touches.length > 0) {
+                clientX = e.touches[0].clientX;
+                clientY = e.touches[0].clientY;
+            }
+            return {x: clientX, y: clientY};
+        }
+
+        canvasElement.addEventListener('mousedown', (e) => {
+            const pos = setMouseSource(e);
+            handleInput(pos.x, pos.y, true);
+        });
+        canvasElement.addEventListener('mousemove', (e) => {
+            if (cursor.source === 'MOUSE') {
+                const pos = setMouseSource(e);
+                handleInput(pos.x, pos.y, cursor.isPinching);
+            }
+        });
+        canvasElement.addEventListener('mouseup', (e) => {
+            const pos = setMouseSource(e);
+            handleInput(pos.x, pos.y, false);
+        });
+        
+        // Touch events
+        canvasElement.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const pos = setMouseSource(e);
+            handleInput(pos.x, pos.y, true);
+        }, {passive: false});
+        canvasElement.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            if (cursor.source === 'MOUSE') {
+                const pos = setMouseSource(e);
+                handleInput(pos.x, pos.y, cursor.isPinching);
+            }
+        }, {passive: false});
+        canvasElement.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            // touch ends, use last known pos but set pinching false
+            handleInput(cursor.x, cursor.y, false);
+        });
+
+        // Revert to HAND source if hand tracking comes back and mouse is idle
+        setInterval(() => {
+            if (cursor.source === 'MOUSE' && !cursor.isPinching) {
+                // If we haven't clicked in a while and hands are detected, switch back
+                cursor.source = 'NONE';
+            }
+        }, 3000);
+
+        function drawLoop() {
+            ctx.clearRect(0, 0, cw, ch);
+
+            // 1. Draw MediaPipe Hand Skeleton (only if detected and active)
+            if (handLandmarks && cursor.source !== 'MOUSE') {
+                ctx.save();
+                // We need to mirror the drawing context to draw the skeleton correctly 
+                // because the coordinates were derived from a mirrored video.
+                // Actually, earlier we mapped (1-x)*cw. So coordinates are already in screen space.
+                // We can draw directly!
+                
+                // Draw connections manually for custom styling
+                const connections = HAND_CONNECTIONS;
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+                ctx.lineWidth = 2;
+                
+                for (let i = 0; i < connections.length; i++) {
+                    const p1 = handLandmarks[connections[i][0]];
+                    const p2 = handLandmarks[connections[i][1]];
+                    
+                    const x1 = (1 - p1.x) * cw;
+                    const y1 = p1.y * ch;
+                    const x2 = (1 - p2.x) * cw;
+                    const y2 = p2.y * ch;
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(x1, y1);
+                    ctx.lineTo(x2, y2);
+                    ctx.stroke();
+                }
+
+                // Draw joints
+                ctx.fillStyle = 'rgba(96, 165, 250, 0.6)'; // Tailwind blue-400
+                for (let i = 0; i < handLandmarks.length; i++) {
+                    const x = (1 - handLandmarks[i].x) * cw;
+                    const y = handLandmarks[i].y * ch;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 3, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+                ctx.restore();
+            }
+
+            // Manage Status Message
+            if (gameState !== 'START' && gameState !== 'END') {
+                if (!handsDetected && cursor.source !== 'MOUSE') {
+                    statusMessage.classList.remove('hidden');
+                } else {
+                    statusMessage.classList.add('hidden');
+                }
+            }
+
+            // Draw based on Game State
+            if (gameState === 'INSTRUCT' && startButton3D) {
+                // Draw floating start button (Glassmorphism 3D style)
+                ctx.save();
+                ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
+                ctx.shadowBlur = 10;
+                ctx.shadowOffsetY = startButton3D.hovered ? 2 : 5;
+                
+                const btnY = startButton3D.hovered && cursor.isPinching ? startButton3D.y + 3 : startButton3D.y;
+
+                // Button bg
+                ctx.fillStyle = startButton3D.hovered ? 'rgba(74, 222, 128, 0.9)' : 'rgba(34, 197, 94, 0.8)'; // Green
+                roundRect(ctx, startButton3D.x, btnY, startButton3D.w, startButton3D.h, 15, true, false);
+                
+                // Button Border (glass effect)
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+                roundRect(ctx, startButton3D.x, btnY, startButton3D.w, startButton3D.h, 15, false, true);
+
+                // Text
+                ctx.fillStyle = 'white';
+                ctx.font = 'bold 24px Inter';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.shadowBlur = 0;
+                ctx.fillText(startButton3D.text, startButton3D.x + startButton3D.w/2, btnY + startButton3D.h/2);
+                ctx.restore();
+            }
+            else if (gameState === 'PLAYING') {
+                // Draw Drop Zones
+                dropZones.forEach(zone => {
+                    ctx.save();
+                    if (zone.filled) {
+                        ctx.fillStyle = 'rgba(74, 222, 128, 0.2)'; // Green tint
+                        ctx.strokeStyle = 'rgba(74, 222, 128, 0.8)';
+                    } else {
+                        ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+                        ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+                    }
+                    ctx.lineWidth = 3;
+                    ctx.setLineDash([10, 5]);
+                    roundRect(ctx, zone.x, zone.y, zone.w, zone.h, 10, true, true);
+                    ctx.restore();
+                });
+
+                // Draw Word Cards (2.5D Style)
+                wordCards.forEach(card => {
+                    ctx.save();
+                    
+                    // Shadow/Depth
+                    ctx.shadowColor = 'rgba(0,0,0,0.4)';
+                    ctx.shadowBlur = card === draggedCard ? 15 : 5;
+                    ctx.shadowOffsetY = card === draggedCard ? 10 : 3;
+
+                    // Position adjustment for 2.5D pop
+                    const drawX = card.x;
+                    const drawY = card === draggedCard ? card.y - 5 : card.y;
+
+                    // Card Background (Glassy white)
+                    ctx.fillStyle = card.isPlaced ? 'rgba(255, 255, 255, 0.9)' : 
+                                   (card.hovered ? 'rgba(240, 248, 255, 0.95)' : 'rgba(255, 255, 255, 0.85)');
+                    roundRect(ctx, drawX, drawY, card.w, card.h, 12, true, false);
+                    
+                    // Highlight edge
+                    ctx.lineWidth = 2;
+                    ctx.strokeStyle = card.isPlaced ? '#4ade80' : 'rgba(255,255,255,0.8)';
+                    roundRect(ctx, drawX, drawY, card.w, card.h, 12, false, true);
+
+                    ctx.shadowBlur = 0; // turn off shadow for text/emoji
+
+                    // Emoji
+                    ctx.font = '50px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(card.emoji, drawX + card.w/2, drawY + card.h/2 - 15);
+
+                    // Word Text
+                    ctx.fillStyle = '#1e293b'; // slate-800
+                    ctx.font = 'bold 20px Inter';
+                    ctx.fillText(card.text, drawX + card.w/2, drawY + card.h - 25);
+                    
+                    ctx.restore();
+                });
+            }
+
+            // 2. Draw Custom Cursor over everything
+            if (gameState !== 'START' && gameState !== 'END' && cursor.x > 0) {
+                drawCursor();
+            }
+
+            requestAnimationFrame(drawLoop);
+        }
+
+        function drawCursor() {
+            ctx.save();
+            const r = 15;
+            
+            ctx.beginPath();
+            ctx.arc(cursor.x, cursor.y, r, 0, 2 * Math.PI);
+
+            if (cursor.state === 'NORMAL') {
+                ctx.fillStyle = 'rgba(56, 189, 248, 0.5)'; // Blue
+                ctx.strokeStyle = 'rgba(56, 189, 248, 1)';
+                ctx.lineWidth = 2;
+                ctx.fill();
+                ctx.stroke();
+            } 
+            else if (cursor.state === 'HOVER') {
+                ctx.fillStyle = 'rgba(250, 204, 21, 0.3)'; // Yellow
+                ctx.strokeStyle = 'rgba(250, 204, 21, 1)';
+                ctx.lineWidth = 3;
+                ctx.setLineDash([5, 3]);
+                ctx.fill();
+                ctx.stroke();
+            }
+            else if (cursor.state === 'MISS') {
+                ctx.fillStyle = 'rgba(239, 68, 68, 0.5)'; // Red
+                ctx.strokeStyle = 'rgba(239, 68, 68, 1)';
+                ctx.lineWidth = 3;
+                ctx.fill();
+                ctx.stroke();
+            }
+            else if (cursor.state === 'HIT') {
+                ctx.fillStyle = 'rgba(74, 222, 128, 0.6)'; // Green
+                ctx.strokeStyle = 'rgba(74, 222, 128, 1)';
+                ctx.lineWidth = 3;
+                ctx.fill();
+                ctx.stroke();
+                
+                // Draw tick
+                ctx.beginPath();
+                ctx.strokeStyle = 'white';
+                ctx.lineWidth = 2;
+                ctx.moveTo(cursor.x - 5, cursor.y);
+                ctx.lineTo(cursor.x - 1, cursor.y + 5);
+                ctx.lineTo(cursor.x + 7, cursor.y - 4);
+                ctx.stroke();
+            }
+            
+            // Draw pinch indicator
+            if (cursor.isPinching) {
+                ctx.beginPath();
+                ctx.arc(cursor.x, cursor.y, r * 0.5, 0, 2 * Math.PI);
+                ctx.fillStyle = 'white';
+                ctx.fill();
+            }
+
+            ctx.restore();
+        }
+
+        async function startCamera() {
+            const camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    // Send frame to MediaPipe
+                    await hands.send({image: videoElement});
+                },
+                width: 1280,
+                height: 720
+            });
+            camera.start();
+        }
+
+        btnInit.addEventListener('click', () => {
+            // Hide start screen, show loading/instructions
+            startScreen.classList.add('hidden');
+            
+            // Initialize camera
+            startCamera();
+            
+            // Setup Instruction Phase
+            gameState = 'INSTRUCT';
+            setupStartButton();
+            headerUI.classList.remove('hidden');
+            levelTitle.innerText = "Tutorial";
+            thaiTranslation.innerText = "จีบนิ้วเพื่อกดปุ่ม / Pinch to click";
+            
+            // Start render loop
+            requestAnimationFrame(drawLoop);
+        });
+
+        btnRestart.addEventListener('click', () => {
+            endScreen.classList.add('hidden');
+            score = 0;
+            scoreDisplay.innerText = score;
+            initLevel(0);
+        });
+
+        // Prevent context menu on canvas for better touch experience
+        canvasElement.addEventListener('contextmenu', e => e.preventDefault());
+
+    </script>
+</body>
+</html>
